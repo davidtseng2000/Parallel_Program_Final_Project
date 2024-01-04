@@ -11,6 +11,9 @@ using namespace std;
 #define BlockSize 1024
 cudaEvent_t start, stop;
 float *Data,*dev_srcData,*dev_dstData;
+unsigned int *block_sum_0, *block_sum_1, *block_sum_2, *block_sum_3;
+
+int num_block;
 
 
 // radix sort
@@ -24,7 +27,8 @@ __device__ void preprocess_float(float*  data, int num_lists, int num_data, int 
 __device__ void Aeprocess_float(float*  data, int num_lists, int num_data, int tid);
 
 // radix sort v1 : intra block radix sort
-__global__ void Intra_Block_radix_sort(float* src_data,float* dest_data,int num_data);
+__global__ void Intra_Block_radix_sort(float* src_data,float* dest_data,int num_data, \
+                                        unsigned int* block_sum_0, unsigned int* block_sum_1, unsigned int* block_sum_2, unsigned int* block_sum_3);
 __global__ void Data_Preprocess(float* src_data,int num_data);
 __global__ void Data_Postprocess(float* src_data,int num_data);
 
@@ -47,6 +51,8 @@ int main(int argc, char **argv){
     cudaEventCreate( &start );
     cudaEventCreate( &stop );
 
+    num_block = (N+BlockSize-1)/BlockSize;
+
     // input 
     Data=new float[N];
     INPUT(FIN,N);
@@ -54,16 +60,22 @@ int main(int argc, char **argv){
     // SHOW_BIN(N);
     // cuda preprocess
     cudaMalloc((void**)&dev_srcData,sizeof(float)*N);
-    cudaMalloc((void**)&dev_dstData,sizeof(float)*N);
+    cudaMalloc((void**)&dev_dstData,sizeof(float)*N);    
     cudaMemcpy(dev_srcData, Data, sizeof(float)*N, cudaMemcpyHostToDevice);
+
+    cudaMalloc((void**)&block_sum_0,sizeof(unsigned int)*num_block);
+    cudaMalloc((void**)&block_sum_1,sizeof(unsigned int)*num_block);
+    cudaMalloc((void**)&block_sum_2,sizeof(unsigned int)*num_block);
+    cudaMalloc((void**)&block_sum_3,sizeof(unsigned int)*num_block);
+
 
     // int num_lists = 128; // the number of parallel threads
     // radix sort
     cudaEventRecord( start, 0 ) ;
     // GPU_radix_sort<<<1,num_lists>>>(dev_srcData, dev_dstData, num_lists, N);
-    Data_Preprocess<<< (N+BlockSize-1)/BlockSize,BlockSize>>>(dev_srcData,N);
-    Intra_Block_radix_sort<<< (N+BlockSize-1)/BlockSize,BlockSize>>>(dev_srcData,dev_dstData,N);
-    Data_Postprocess<<< (N+BlockSize-1)/BlockSize,BlockSize>>>(dev_dstData,N);
+    Data_Preprocess<<< num_block , BlockSize>>>(dev_srcData,N);
+    Intra_Block_radix_sort<<< num_block, BlockSize>>>(dev_srcData,dev_dstData,N, block_sum_0, block_sum_1, block_sum_2, block_sum_3);
+    Data_Postprocess<<< num_block, BlockSize>>>(dev_dstData,N);
     cudaEventRecord( stop, 0 ) ;
     cudaEventSynchronize( stop );
 
@@ -325,7 +337,8 @@ __device__ void ScanBlock(unsigned int* sData){
     __syncthreads();
 }
 
-__global__ void Intra_Block_radix_sort(float* src_data,float* dest_data,int num_data){
+__global__ void Intra_Block_radix_sort(float* src_data,float* dest_data,int num_data,\
+                                        unsigned int* block_sum_0, unsigned int* block_sum_1, unsigned int* block_sum_2, unsigned int* block_sum_3){
     int tid=blockDim.x*blockIdx.x+threadIdx.x;
     if(tid>= num_data) return ;
     // // load block data to share memory
@@ -386,10 +399,15 @@ __global__ void Intra_Block_radix_sort(float* src_data,float* dest_data,int num_
         //     total_False=PrefixFalseBuffer[num_data-1]+FalseBuffer[num_data-1];
         // }
         // __syncthreads();
-        PrefixFalseBuffer_0[tid+1]=FalseBuffer_0[tid];
-        PrefixFalseBuffer_1[tid+1]=FalseBuffer_1[tid];
-        PrefixFalseBuffer_2[tid+1]=FalseBuffer_2[tid];
-        PrefixFalseBuffer_3[tid+1]=FalseBuffer_3[tid];
+
+        // PrefixFalseBuffer_0[tid+1]=FalseBuffer_0[tid];
+        // PrefixFalseBuffer_1[tid+1]=FalseBuffer_1[tid];
+        // PrefixFalseBuffer_2[tid+1]=FalseBuffer_2[tid];
+        // PrefixFalseBuffer_3[tid+1]=FalseBuffer_3[tid];
+        PrefixFalseBuffer_0[threadIdx.x+1]=FalseBuffer_0[threadIdx.x];
+        PrefixFalseBuffer_1[threadIdx.x+1]=FalseBuffer_1[threadIdx.x];
+        PrefixFalseBuffer_2[threadIdx.x+1]=FalseBuffer_2[threadIdx.x];
+        PrefixFalseBuffer_3[threadIdx.x+1]=FalseBuffer_3[threadIdx.x];
         __syncthreads();
 
         ScanBlock(PrefixFalseBuffer_0+1);// The last one is total false
@@ -404,21 +422,26 @@ __global__ void Intra_Block_radix_sort(float* src_data,float* dest_data,int num_
         int num_012 = num_01 + PrefixFalseBuffer_2[num_data];
 
         if(FalseBuffer_0[tid]){
-            Position[tid]=PrefixFalseBuffer_0[tid];            
+            // Position[tid]=PrefixFalseBuffer_0[tid];
+            Position[threadIdx.x]=PrefixFalseBuffer_0[threadIdx.x ];          
         }
         else if(FalseBuffer_1[tid]){
-            Position[tid]= num_0 + PrefixFalseBuffer_1[tid]; // (0 有幾個) + (這是第幾個 1)
+            // Position[tid]= num_0 + PrefixFalseBuffer_1[tid]; // (0 有幾個) + (這是第幾個 1)
+            Position[threadIdx.x]= num_0 + PrefixFalseBuffer_1[threadIdx.x]; // (0 有幾個) + (這是第幾個 1)
         }
         else if(FalseBuffer_2[tid]){
-            Position[tid]= num_01 + PrefixFalseBuffer_2[tid]; // (0 有幾個) + (1 有幾個) + (這是第幾個 2)
+            // Position[tid]= num_01 + PrefixFalseBuffer_2[tid]; // (0 有幾個) + (1 有幾個) + (這是第幾個 2)
+            Position[threadIdx.x]= num_01 + PrefixFalseBuffer_2[threadIdx.x]; // (0 有幾個) + (1 有幾個) + (這是第幾個 2)
         }
         else if(FalseBuffer_3[tid]){
-            Position[tid]= num_012 + PrefixFalseBuffer_3[tid]; // (0 有幾個) + (1 有幾個) + (2 有幾個) + (這是第幾個 3)
+            // Position[tid]= num_012 + PrefixFalseBuffer_3[tid]; // (0 有幾個) + (1 有幾個) + (2 有幾個) + (這是第幾個 3)
+            Position[threadIdx.x]= num_012 + PrefixFalseBuffer_3[threadIdx.x]; // (0 有幾個) + (1 有幾個) + (2 有幾個) + (這是第幾個 3)
         }
         __syncthreads();
 
         // scatter
-        tempData[Position[tid]]=sData[tid];
+        // tempData[Position[tid]]=sData[tid];
+        tempData[Position[threadIdx.x]]=sData[threadIdx.x];
 
         bit_mask_1<<=2;
         bit_mask_2<<=2;
@@ -426,7 +449,51 @@ __global__ void Intra_Block_radix_sort(float* src_data,float* dest_data,int num_
 
         __syncthreads();
         // save data
-        sData[threadIdx.x]=tempData[tid];
+
+        // sData[threadIdx.x]=tempData[tid];
+        sData[threadIdx.x]=tempData[threadIdx.x];
+
+
+        if(threadIdx.x == 0){
+
+            ///////////////////////////////////// 測試區塊 /////////////////////////////////////
+            printf("\033[1;34mRound %d\033[0m\n", i);
+            // 印出該 pass 跑完後，編號為 blockIdx.x 的 block 做完的 Local shuffle 長怎樣
+            printf("Local shuffle for block %d:\n", blockIdx.x);
+            for(int j = 0; j < blockDim.x; j++){
+                if(sData[j] == 0) break;
+                for(int k=0;k<32;k++){
+                    // 變色看得比較清楚這輪是在處理哪兩個位數
+                    if(k <= 31-2*i && k >= 30-2*i)
+                        printf("\033[1;31m%s\033[0m", ((((unsigned int *)sData)[j]&(0x80000000>>k))?"1":"0"));
+                    else
+                        printf("%s", ((((unsigned int *)sData)[j]&(0x80000000>>k))?"1":"0"));
+                }
+                printf("\n");
+            }
+            ///////////////////////////////////// 測試區塊 /////////////////////////////////////
+
+            // example: 第 blockIdx.x 個 block 的 0 總共有 PrefixFalseBuffer_0[num_data] 個
+            block_sum_0[blockIdx.x] = PrefixFalseBuffer_0[num_data];
+            block_sum_1[blockIdx.x] = PrefixFalseBuffer_1[num_data];
+            block_sum_2[blockIdx.x] = PrefixFalseBuffer_2[num_data];
+            block_sum_3[blockIdx.x] = PrefixFalseBuffer_3[num_data];
+
+            ///////////////////////////////////// 測試區塊 /////////////////////////////////////
+            printf("===============================================\n");
+            printf("This is input block %d\n", blockIdx.x);
+            printf("block_sum_0 position %d:\n", blockIdx.x);
+            printf("%d\n", block_sum_0[blockIdx.x]);
+            printf("block_sum_1 position %d:\n", blockIdx.x);
+            printf("%d\n", block_sum_1[blockIdx.x]);
+            printf("block_sum_2 position %d:\n", blockIdx.x);
+            printf("%d\n", block_sum_2[blockIdx.x]);
+            printf("block_sum_3 position %d:\n", blockIdx.x);
+            printf("%d\n", block_sum_3[blockIdx.x]);
+            printf("===============================================\n");
+            ///////////////////////////////////// 測試區塊 /////////////////////////////////////
+            
+        }        
         __syncthreads();
     }
     
