@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 #include <fstream>
 // #include <cub/cub.cuh>
+
 using namespace std;
 #define MAX_NUM_LISTS 256
 #define BlockSize 1024
@@ -33,6 +34,7 @@ void OUTPUT(char* FOUT,int N);
 void SHOW(int N);
 void SHOW_BIN(int N);
 bool EVALUATE(int N);
+
 int main(int argc, char **argv){
     if(argc!=4){
         cout << "The input format must be ./program N input_data output_path" <<endl;
@@ -41,14 +43,14 @@ int main(int argc, char **argv){
     int N=atoi(argv[1]);
     char* FIN=argv[2];
     char* FOUT=argv[3];
-    float   elapsedTime;
+    float elapsedTime;
     cudaEventCreate( &start );
     cudaEventCreate( &stop );
 
     // input 
     Data=new float[N];
     INPUT(FIN,N);
-    SHOW(N);
+    // SHOW(N);
     // SHOW_BIN(N);
     // cuda preprocess
     cudaMalloc((void**)&dev_srcData,sizeof(float)*N);
@@ -70,7 +72,7 @@ int main(int argc, char **argv){
     // output
     cudaFree(dev_srcData);
     cudaFree(dev_dstData);
-    // SHOW(N);
+    SHOW(N);
     OUTPUT(FOUT,N);
 
     // Test the correstness and output the running time
@@ -101,6 +103,8 @@ void SHOW_BIN(int N){
     }
     cout << "\n==================================\n";
 }
+
+
 void INPUT(char* FIN,int N){
     FILE* file = fopen(FIN, "rb");
     fread(Data,sizeof(float)*N,N,file);
@@ -170,7 +174,7 @@ __device__ void radix_sort(float*  data_0, float*  data_1, \
             unsigned int *temp =(unsigned int *) &data_0[i];
             if(*temp & bit_mask)
             {
-                data_1[tid+count_1*num_lists] = data_0[i]; //bug 在这里 等于时会做强制类型转化
+                data_1[tid+count_1*num_lists] = data_0[i];
                 count_1 += 1;
             }
             else{
@@ -198,7 +202,7 @@ __device__ void merge_list( float* src_data, float*  dest_list, \
     for(int i=0;i<num_data;i++)
     {
         record_val[tid] = 0;
-        record_tid[tid] = tid; // bug2 每次都要进行初始化
+        record_tid[tid] = tid;
         if(list_index[tid] < num_per_list)
         {
             int src_index = tid + list_index[tid]*num_lists;
@@ -269,7 +273,7 @@ __device__ void ScanWarp(unsigned int* sData,unsigned int lane){
     //         sData[i]+=sData[i-1];
     //     }
     // }
-    // Kogge-Stone
+
     if(lane>=1)
         sData[lane]+=sData[lane-1];
     __syncwarp();
@@ -285,7 +289,7 @@ __device__ void ScanWarp(unsigned int* sData,unsigned int lane){
     if(lane>=16)
         sData[lane]+=sData[lane-16];
     __syncwarp();
-    // // Reduce-then-scan
+
     // if(lane&0x00000001)
     //     sData[lane]+=sData[lane-1];
     // __syncwarp();
@@ -303,10 +307,14 @@ __device__ void ScanBlock(unsigned int* sData){
     __shared__  unsigned int warp_sum[32];  // block size 1024 / warp size 32 = 32 
     ScanWarp(sData+(warp_id<<5),lane);
     __syncthreads();
+
+    // Kogge-Stone
     if(lane==31){
         warp_sum[warp_id]=sData[threadIdx.x];
     }
     __syncthreads();
+
+    // Reduce-then-scan
     if(warp_id==0){
         ScanWarp(warp_sum,lane);
     }
@@ -323,19 +331,50 @@ __global__ void Intra_Block_radix_sort(float* src_data,float* dest_data,int num_
     // // load block data to share memory
     __shared__ unsigned int sData[BlockSize];
     __shared__ unsigned int tempData[BlockSize];
-    __shared__ unsigned int FalseBuffer[BlockSize+1]; // e buffer
-    __shared__ unsigned int PrefixFalseBuffer[BlockSize+1]; // f buffer
+
+    __shared__ unsigned int FalseBuffer_0[BlockSize+1]; // e0 buffer
+    __shared__ unsigned int FalseBuffer_1[BlockSize+1]; // e1 buffer
+    __shared__ unsigned int FalseBuffer_2[BlockSize+1]; // e2 buffer
+    __shared__ unsigned int FalseBuffer_3[BlockSize+1]; // e3 buffer
+
+    __shared__ unsigned int PrefixFalseBuffer_0[BlockSize+1]; // f0 buffer
+    __shared__ unsigned int PrefixFalseBuffer_1[BlockSize+1]; // f1 buffer
+    __shared__ unsigned int PrefixFalseBuffer_2[BlockSize+1]; // f2 buffer
+    __shared__ unsigned int PrefixFalseBuffer_3[BlockSize+1]; // f3 buffer
+
     __shared__ unsigned int Position[BlockSize];
-    unsigned int bit_mask=1;
+
+    // unsigned int bit_mask_0=0;
+    unsigned int bit_mask_1= 1;
+    unsigned int bit_mask_2= 2;
+    unsigned int bit_mask_3= 3;     
+
     sData[threadIdx.x]=((unsigned int*)src_data)[tid]; 
 
     __syncthreads();
-    // 32 pass radix sort
-    for(int i=0;i<32;i++){
-        // compte False potision
-        FalseBuffer[threadIdx.x]=(sData[threadIdx.x]&bit_mask)?0:1;
+    // 16 pass radix sort
+    
+    for(int i=0;i<16;i++){        
+        // compte False potision  
+        // bit_mask_3 必須先 check，否則 "3(11)" 可能被算到 "1(01)" 或 "2(10)"
+        int num;
+        if((sData[threadIdx.x]&bit_mask_3) == 0)
+            num = 0;
+        else if ((sData[threadIdx.x]&bit_mask_3) == bit_mask_3)
+            num = 3;
+        else if ((sData[threadIdx.x]&bit_mask_1) == bit_mask_1)
+            num = 1;
+        else if ((sData[threadIdx.x]&bit_mask_2) == bit_mask_2)
+            num = 2;
 
-        
+        FalseBuffer_0[threadIdx.x]=(num == 0)?1:0;
+        __syncthreads();
+        FalseBuffer_1[threadIdx.x]=(num == 1)?1:0;
+        __syncthreads();
+        FalseBuffer_2[threadIdx.x]=(num == 2)?1:0;
+        __syncthreads();
+        FalseBuffer_3[threadIdx.x]=(num == 3)?1:0;
+    
         
         __syncthreads();
         //prefix sum
@@ -347,20 +386,46 @@ __global__ void Intra_Block_radix_sort(float* src_data,float* dest_data,int num_
         //     total_False=PrefixFalseBuffer[num_data-1]+FalseBuffer[num_data-1];
         // }
         // __syncthreads();
-        PrefixFalseBuffer[tid+1]=FalseBuffer[tid];
+        PrefixFalseBuffer_0[tid+1]=FalseBuffer_0[tid];
+        PrefixFalseBuffer_1[tid+1]=FalseBuffer_1[tid];
+        PrefixFalseBuffer_2[tid+1]=FalseBuffer_2[tid];
+        PrefixFalseBuffer_3[tid+1]=FalseBuffer_3[tid];
         __syncthreads();
-        ScanBlock(PrefixFalseBuffer+1);// The last one is total false
-        __syncthreads();
-        // // compute position
-        Position[tid]=FalseBuffer[tid]?PrefixFalseBuffer[tid]:tid-PrefixFalseBuffer[tid]+PrefixFalseBuffer[num_data];
 
-        
+        ScanBlock(PrefixFalseBuffer_0+1);// The last one is total false
+        ScanBlock(PrefixFalseBuffer_1+1);// The last one is total false
+        ScanBlock(PrefixFalseBuffer_2+1);// The last one is total false
+        ScanBlock(PrefixFalseBuffer_3+1);// The last one is total false
         __syncthreads();
+
+        // // compute position
+        int num_0 = PrefixFalseBuffer_0[num_data];
+        int num_01 = num_0 + PrefixFalseBuffer_1[num_data];
+        int num_012 = num_01 + PrefixFalseBuffer_2[num_data];
+
+        if(FalseBuffer_0[tid]){
+            Position[tid]=PrefixFalseBuffer_0[tid];            
+        }
+        else if(FalseBuffer_1[tid]){
+            Position[tid]= num_0 + PrefixFalseBuffer_1[tid]; // (0 有幾個) + (這是第幾個 1)
+        }
+        else if(FalseBuffer_2[tid]){
+            Position[tid]= num_01 + PrefixFalseBuffer_2[tid]; // (0 有幾個) + (1 有幾個) + (這是第幾個 2)
+        }
+        else if(FalseBuffer_3[tid]){
+            Position[tid]= num_012 + PrefixFalseBuffer_3[tid]; // (0 有幾個) + (1 有幾個) + (2 有幾個) + (這是第幾個 3)
+        }
+        __syncthreads();
+
         // scatter
         tempData[Position[tid]]=sData[tid];
-        bit_mask<<=1;
+
+        bit_mask_1<<=2;
+        bit_mask_2<<=2;
+        bit_mask_3<<=2;
+
         __syncthreads();
-        // // save data
+        // save data
         sData[threadIdx.x]=tempData[tid];
         __syncthreads();
     }
