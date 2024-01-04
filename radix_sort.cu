@@ -457,7 +457,8 @@ __global__ void Intra_Block_radix_sort(float* src_data,float* dest_data,int num_
         if(threadIdx.x == 0){
 
             ///////////////////////////////////// 測試區塊 /////////////////////////////////////
-            printf("\033[1;34mRound %d\033[0m\n", i);
+            if(blockIdx.x == 0)
+                printf("\033[1;34mRound %d\033[0m\n", i);
             // 印出該 pass 跑完後，編號為 blockIdx.x 的 block 做完的 Local shuffle 長怎樣
             printf("Local shuffle for block %d:\n", blockIdx.x);
             for(int j = 0; j < blockDim.x; j++){
