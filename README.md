@@ -1,5 +1,6 @@
 # Parallel_Program_Final_Project
-We implement the "Parallel Radix Sort".
+We implement the "Parallel Radix Sort". <br>
+Work with brilliant [Percy](https://github.com/Percyx0313).
 
 ## Data
 We use the testcases 1-30 from CS542200 2023 HW1.  
